@@ -9,7 +9,13 @@ var supabaseKey = builder.Configuration["Supabase:Key"];
 // Registrar el cliente para Inyección de Dependencias
 builder.Services.AddScoped(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        // Esto evita que el serializador se rompa con tipos complejos circulares o internos
+        options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+        options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+    });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 

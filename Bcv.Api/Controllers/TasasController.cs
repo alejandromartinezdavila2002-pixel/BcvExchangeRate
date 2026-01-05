@@ -1,7 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Bcv.Shared;
 using Supabase;
-using Postgrest;
 
 namespace Bcv.Api.Controllers
 {
@@ -16,12 +15,12 @@ namespace Bcv.Api.Controllers
             _supabase = supabase;
         }
 
-        // Endpoint para obtener la última tasa registrada
         [HttpGet("ultima")]
         public async Task<ActionResult<TasaBcv>> GetUltimaTasa()
         {
             try
             {
+                // Al heredar TasaBcv de BaseModel, este .From<TasaBcv>() ya no dará error
                 var respuesta = await _supabase.From<TasaBcv>()
                     .Order("creado_el", Postgrest.Constants.Ordering.Descending)
                     .Limit(1)
@@ -29,16 +28,13 @@ namespace Bcv.Api.Controllers
 
                 var tasa = respuesta.Models.FirstOrDefault();
 
-                if (tasa == null)
-                {
-                    return NotFound(new { mensaje = "No hay tasas registradas en la base de datos." });
-                }
+                if (tasa == null) return NotFound();
 
-                return Ok(tasa);
+                return Ok(tasa); // Gracias al [JsonIgnore], esto ya no dará Error 500
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { mensaje = "Error al consultar Supabase", detalle = ex.Message });
+                return StatusCode(500, new { error = ex.Message });
             }
         }
     }

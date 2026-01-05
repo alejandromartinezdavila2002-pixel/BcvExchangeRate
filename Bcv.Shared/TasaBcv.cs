@@ -1,11 +1,12 @@
 ﻿using Postgrest.Attributes;
 using Postgrest.Models;
-using ColumnAttribute = Postgrest.Attributes.ColumnAttribute;
-using TableAttribute = Postgrest.Attributes.TableAttribute;
+using System.Text.Json.Serialization;
 
 namespace Bcv.Shared
 {
     [Table("bcvtasas")]
+    // Esta línea es el truco: le dice al sistema que solo serialice los datos de TasaBcv
+    [JsonDerivedType(typeof(TasaBcv))]
     public class TasaBcv : BaseModel
     {
         [PrimaryKey("id", false)]
