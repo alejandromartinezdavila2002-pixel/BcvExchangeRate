@@ -1,4 +1,4 @@
-using Bcv.Shared;
+锘縰sing Bcv.Shared;
 using HtmlAgilityPack;
 using Supabase;
 
@@ -18,42 +18,46 @@ namespace Bcv.Worker
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("Worker iniciado. Realizando consulta inicial de arranque...");
+            _logger.LogInformation("Worker iniciado. Sincronizando con la base de datos en la nube...");
 
-            // 1. Consulta directa al compilar/arrancar
+            // 1. Sincronizaci贸n inicial: Consultamos a Supabase cu谩l fue el 煤ltimo registro real
             try
             {
-                await ProcesarTasas();
+                var respuesta = await _supabase.From<TasaBcv>()
+                    .Order("creado_el", Postgrest.Constants.Ordering.Descending)
+                    .Limit(1)
+                    .Get();
+
+                _ultimaTasaLocal = respuesta.Models.FirstOrDefault();
+
+                if (_ultimaTasaLocal != null)
+                {
+                    _logger.LogInformation("Sincronizaci贸n exitosa. 脷ltima tasa registrada: USD {usd} del {fecha}",
+                        _ultimaTasaLocal.Usd, _ultimaTasaLocal.FechaValor);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError("Error en consulta inicial: {msg}", ex.Message);
+                _logger.LogWarning("No se pudo obtener el 煤ltimo registro de la nube (posible tabla vac铆a): {msg}", ex.Message);
             }
 
-            // 2. Bucle de espera inteligente
+            // 2. Realizamos la primera comprobaci贸n de inmediato
+            await ProcesarTasas();
+
+            // 3. Bucle de espera inteligente
             while (!stoppingToken.IsCancellationRequested)
             {
                 DateTime ahora = DateTime.Now;
 
                 if (EsHorarioPermitido(ahora))
                 {
-                    try
-                    {
-                        await ProcesarTasas();
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError("Error durante el scraping programado: {msg}", ex.Message);
-                    }
-
-                    // En la ventana permitida, esperamos 1 hora para la siguiente consulta
+                    await ProcesarTasas();
+                    // Esperamos 1 hora dentro del bloque de horario de publicaci贸n
                     await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
                 }
                 else
                 {
-                    // Si no es horario permitido, calculamos cu醤to falta para la pr髕ima ejecuci髇
-                    // o simplemente esperamos un tiempo prudente (ej: 15 min) antes de volver a chequear el reloj
-                    _logger.LogInformation("Fuera de horario de publicaci髇 (5pm-8pm LV). Esperando...");
+                    _logger.LogInformation("Fuera de horario de publicaci贸n oficial. Esperando...");
                     await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 }
             }
@@ -61,12 +65,10 @@ namespace Bcv.Worker
 
         private bool EsHorarioPermitido(DateTime dt)
         {
-            // Lunes a Viernes solamente
+            // Lunes a Viernes
             bool esDiaLaboral = dt.DayOfWeek != DayOfWeek.Saturday && dt.DayOfWeek != DayOfWeek.Sunday;
-            // Entre las 17:00 (5pm) y las 20:00 (8pm)
-            bool esHoraPunta = dt.Hour >= 17 && dt.Hour <= 20;
-
-            return esDiaLaboral && esHoraPunta;
+            // Ventana de publicaci贸n del BCV (aprox. 5pm a 8pm)
+            return esDiaLaboral && dt.Hour >= 17 && dt.Hour <= 20;
         }
 
         private async Task ProcesarTasas()
@@ -103,7 +105,6 @@ namespace Bcv.Worker
                 _logger.LogInformation("Sin cambios detectados.");
             }
         }
-
         private string ExtraerTexto(HtmlDocument doc, string xpath) =>
             doc.DocumentNode.SelectSingleNode(xpath)?.InnerText.Trim() ?? "N/D";
 
