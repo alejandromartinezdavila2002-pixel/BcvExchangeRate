@@ -1,15 +1,21 @@
+using Supabase;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// 1. Agregar configuración de Supabase
+var supabaseUrl = builder.Configuration["Supabase:Url"];
+var supabaseKey = builder.Configuration["Supabase:Key"];
+
+// Registrar el cliente para Inyección de Dependencias
+builder.Services.AddScoped(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
 
 builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+// Configurar el pipeline de HTTP
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -17,9 +23,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
 app.UseAuthorization();
-
 app.MapControllers();
 
 app.Run();
