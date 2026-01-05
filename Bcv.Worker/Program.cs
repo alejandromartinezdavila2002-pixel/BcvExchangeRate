@@ -8,7 +8,8 @@ var supabaseUrl = builder.Configuration["Supabase:Url"];
 var supabaseKey = builder.Configuration["Supabase:Key"];
 
 // Registrar el cliente de Supabase para que esté disponible en toda la App
-builder.Services.AddScoped(_ => new Client(supabaseUrl!, supabaseKey!));
+
+builder.Services.AddSingleton(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
 
 builder.Services.AddHostedService<Worker>();
 

@@ -5,7 +5,7 @@ using TableAttribute = Postgrest.Attributes.TableAttribute;
 
 namespace Bcv.Shared
 {
-    [Table("BcvTasas")]
+    [Table("bcvtasas")]
     public class TasaBcv : BaseModel
     {
         [PrimaryKey("id", false)]
