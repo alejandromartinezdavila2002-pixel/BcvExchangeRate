@@ -90,7 +90,7 @@ namespace Bcv.Worker
 
             HtmlWeb web = new HtmlWeb
             {
-                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36..."
+                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...",
                 Timeout = 30000 // 30 segundos máximo
             };
 
