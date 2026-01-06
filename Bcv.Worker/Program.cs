@@ -1,17 +1,25 @@
 using Bcv.Worker;
 using Supabase;
-using System.Text; // Necesario para Encoding
+using System.Text;
+using Microsoft.Extensions.Hosting.WindowsServices; // Necesario para el soporte de servicios
 
-// FORZAR UTF-8 PARA CARACTERES ESPECIALES
+// Mantenemos el soporte para tildes y caracteres especiales en logs
 Console.OutputEncoding = Encoding.UTF8;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Leer la configuración
+// 1. CONFIGURACIÓN DEL SERVICIO
+// Esto permite que el ejecutable sea reconocido por Windows como un servicio
+builder.Services.AddWindowsService(options =>
+{
+    options.ServiceName = "BCV Exchange Rate Service";
+});
+
+// 2. CONFIGURACIÓN DE SUPABASE
 var supabaseUrl = builder.Configuration["Supabase:Url"];
 var supabaseKey = builder.Configuration["Supabase:Key"];
 
-// Registrar el cliente de Supabase como Singleton
+// Registrar el cliente como Singleton para que viva durante todo el servicio
 builder.Services.AddSingleton(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
 
 builder.Services.AddHostedService<Worker>();
