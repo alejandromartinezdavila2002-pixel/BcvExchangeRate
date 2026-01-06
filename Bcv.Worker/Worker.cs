@@ -34,6 +34,11 @@ namespace Bcv.Worker
                 {
                     _logger.LogInformation("Sincronización exitosa. Última tasa registrada: USD {usd} del {fecha}",
                         _ultimaTasaLocal.Usd, _ultimaTasaLocal.FechaValor);
+
+                    //tasa de Euro
+                    _logger.LogInformation("Sincronización exitosa. Última tasa registrada: EUR {eur} del {fecha}",
+                        _ultimaTasaLocal.Eur, _ultimaTasaLocal.FechaValor);
+
                 }
             }
             catch (Exception ex)
