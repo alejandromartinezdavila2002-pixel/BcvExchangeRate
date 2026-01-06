@@ -1,27 +1,35 @@
 using Bcv.Worker;
 using Supabase;
 using System.Text;
-using Microsoft.Extensions.Hosting.WindowsServices; // Necesario para el soporte de servicios
+using Microsoft.Extensions.Hosting.WindowsServices;
 
-// Mantenemos el soporte para tildes y caracteres especiales en logs
-Console.OutputEncoding = Encoding.UTF8;
+// 1. CONFIGURACIÓN DEL HOST CON RUTA DINÁMICA
+// Usamos AppContext.BaseDirectory para que el servicio siempre encuentre el appsettings.json
+// aunque Windows lo ejecute desde System32.
+var options = new HostApplicationBuilderSettings
+{
+    ContentRootPath = AppContext.BaseDirectory,
+    Args = args
+};
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = Host.CreateApplicationBuilder(options);
 
-// 1. CONFIGURACIÓN DEL SERVICIO
-// Esto permite que el ejecutable sea reconocido por Windows como un servicio
+// 2. CONFIGURACIÓN DEL SERVICIO DE WINDOWS
 builder.Services.AddWindowsService(options =>
 {
+    // Este es el nombre interno que usará el Service Control Manager
     options.ServiceName = "BCV Exchange Rate Service";
 });
 
-// 2. CONFIGURACIÓN DE SUPABASE
+// 3. CONFIGURACIÓN DE SUPABASE
+// Leemos la configuración desde el appsettings.json que ahora sí será encontrado
 var supabaseUrl = builder.Configuration["Supabase:Url"];
 var supabaseKey = builder.Configuration["Supabase:Key"];
 
-// Registrar el cliente como Singleton para que viva durante todo el servicio
+// Registro del cliente como Singleton para mantener la conexión activa
 builder.Services.AddSingleton(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
 
+// 4. REGISTRO DEL WORKER PRINCIPAL
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

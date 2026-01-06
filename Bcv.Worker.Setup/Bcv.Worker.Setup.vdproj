@@ -15,6 +15,12 @@
     {
         "Entry"
         {
+        "MsmKey" = "8:_047CC4E97DDE4C7C82F4C316C7DFBF2B"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_E37FC4FDA280497FBB939BC0884246A0"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -59,6 +65,36 @@
     {
         "CustomAction"
         {
+            "{4AA51A2D-7D85-4A59-BA75-B0809FC8B380}:_1A0177109A934B62A9775CF6A8842224"
+            {
+            "Name" = "8:cmd.exe"
+            "Condition" = "8:"
+            "Object" = "8:_047CC4E97DDE4C7C82F4C316C7DFBF2B"
+            "FileType" = "3:2"
+            "InstallAction" = "3:1"
+            "Arguments" = "8:/c sc create \"BcvRateService\" binpath= \"[TARGETDIR]Bcv.Worker.exe\" start= auto"
+            "EntryPoint" = "8:"
+            "Sequence" = "3:1"
+            "Identifier" = "8:_21437D4D_8268_4176_A157_8159958AFBDF"
+            "InstallerClass" = "11:TRUE"
+            "CustomActionData" = "8:"
+            "Run64Bit" = "11:TRUE"
+            }
+            "{4AA51A2D-7D85-4A59-BA75-B0809FC8B380}:_C91A251DA6BC498EB8E9C3CCC87B7657"
+            {
+            "Name" = "8:cmd.exe"
+            "Condition" = "8:"
+            "Object" = "8:_047CC4E97DDE4C7C82F4C316C7DFBF2B"
+            "FileType" = "3:2"
+            "InstallAction" = "3:4"
+            "Arguments" = "8:/c sc delete \"BcvRateService\""
+            "EntryPoint" = "8:"
+            "Sequence" = "3:1"
+            "Identifier" = "8:_CF2F6407_7D0E_4AF5_9210_3BF329EB061B"
+            "InstallerClass" = "11:FALSE"
+            "CustomActionData" = "8:"
+            "Run64Bit" = "11:FALSE"
+            }
         }
         "DefaultFeature"
         {
@@ -92,6 +128,26 @@
         }
         "File"
         {
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_047CC4E97DDE4C7C82F4C316C7DFBF2B"
+            {
+            "SourcePath" = "8:C:\\Windows\\System32\\cmd.exe"
+            "TargetName" = "8:cmd.exe"
+            "Tag" = "8:"
+            "Folder" = "8:_5E0AD6BA5D1641B9A5846145C71FFCAC"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:TRUE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
         }
         "FileType"
         {

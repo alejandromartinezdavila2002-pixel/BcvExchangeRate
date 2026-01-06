@@ -62,7 +62,10 @@ namespace Bcv.Worker
                 }
                 else
                 {
-                    _logger.LogInformation("Fuera de horario de publicación oficial. Esperando...");
+                    var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                                   TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
+
+                    _logger.LogInformation("Fuera de horario (Hora Vzla: {hora}). Esperando...", horaVzla.ToString("HH:mm"));
                     await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 }
             }
@@ -70,10 +73,15 @@ namespace Bcv.Worker
 
         private bool EsHorarioPermitido(DateTime dt)
         {
+            // Convertimos la hora actual a la hora oficial de Venezuela
+            var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                           TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
+
             // Lunes a Viernes
-            bool esDiaLaboral = dt.DayOfWeek != DayOfWeek.Saturday && dt.DayOfWeek != DayOfWeek.Sunday;
-            // Ventana de publicación del BCV (aprox. 5pm a 8pm)
-            return esDiaLaboral && dt.Hour >= 17 && dt.Hour <= 20;
+            bool esDiaLaboral = horaVzla.DayOfWeek != DayOfWeek.Saturday && horaVzla.DayOfWeek != DayOfWeek.Sunday;
+
+            // Ventana de publicación del BCV (usando la hora de Venezuela calculada)
+            return esDiaLaboral && horaVzla.Hour >= 17 && horaVzla.Hour <= 20;
         }
 
         private async Task ProcesarTasas()
@@ -83,6 +91,7 @@ namespace Bcv.Worker
             HtmlWeb web = new HtmlWeb
             {
                 UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36..."
+                Timeout = 30000 // 30 segundos máximo
             };
 
             var oDoc = await Task.Run(() => web.Load("https://www.bcv.org.ve/"));
@@ -98,8 +107,8 @@ namespace Bcv.Worker
                 CreadoEl = DateTime.UtcNow
             };
 
-            // Solo guardamos si hay un cambio real o es la primera vez que arranca
-            if (_ultimaTasaLocal == null || tasaActual.Usd != _ultimaTasaLocal.Usd || tasaActual.FechaValor != _ultimaTasaLocal.FechaValor)
+            /// Solo guardamos si hay un cambio real Y si la tasa extraída es válida (mayor a 0)
+            if (tasaActual.Usd > 0 && (_ultimaTasaLocal == null || tasaActual.Usd != _ultimaTasaLocal.Usd || tasaActual.FechaValor != _ultimaTasaLocal.FechaValor))
             {
                 _logger.LogInformation("Guardando cambio detectado: USD {usd}", tasaActual.Usd);
                 await _supabase.From<TasaBcv>().Insert(tasaActual);
