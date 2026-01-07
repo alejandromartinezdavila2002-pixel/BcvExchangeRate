@@ -1,5 +1,7 @@
 using Bcv.Worker;
 using Supabase;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using System.Text;
 using Microsoft.Extensions.Hosting.WindowsServices;
 
@@ -28,6 +30,19 @@ var supabaseKey = builder.Configuration["Supabase:Key"];
 
 // Registro del cliente como Singleton para mantener la conexión activa
 builder.Services.AddSingleton(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
+
+// 5. REGISTRO DE CLASES HTTP (NUEVO)
+builder.Services.AddHttpClient("BcvClient", client =>
+{
+    // Imitamos un navegador para evitar bloqueos del servidor BCV
+    client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    client.Timeout = TimeSpan.FromSeconds(30); // Timeout explícito
+});
+
+builder.Services.AddHttpClient("TelegramClient", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
 
 // 4. REGISTRO DEL WORKER PRINCIPAL
 builder.Services.AddHostedService<Worker>();

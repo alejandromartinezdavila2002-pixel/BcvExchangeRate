@@ -1,7 +1,8 @@
 ﻿using Bcv.Shared;
 using HtmlAgilityPack;
-using System.Net.Http;
 using Supabase;
+using System.Net.Http;
+using System.Text;
 
 namespace Bcv.Worker
 {
@@ -9,21 +10,26 @@ namespace Bcv.Worker
     {
         private readonly ILogger<Worker> _logger;
         private readonly Supabase.Client _supabase;
-        private TasaBcv? _ultimaTasaLocal;
         private readonly IConfiguration _config;
+        private readonly IHttpClientFactory _httpClientFactory; // 1. Usar Factory
+        private TasaBcv? _ultimaTasaLocal;
 
         // Control de notificaciones
         private bool _notificadoHoy = false;
         private int _ultimoDiaProcesado = -1;
 
-        public Worker(ILogger<Worker> logger, Supabase.Client supabase, IConfiguration config)
+        public Worker(
+            ILogger<Worker> logger, 
+            Supabase.Client supabase, 
+            IConfiguration config,
+            IHttpClientFactory httpClientFactory) // Inyección del Factory
         {
             _logger = logger;
             _supabase = supabase;
-            _config = config; // Ahora leemos los secretos desde aquí
+            _config = config;
+            _httpClientFactory = httpClientFactory;
         }
 
-        // Se ejecuta cuando el servicio se detiene o se cierra
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             await EnviarTelegram("🛑 *El servicio BCV se ha cerrado o está inactivo.*");
@@ -32,6 +38,9 @@ namespace Bcv.Worker
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            // 2. Notificar inicio ANTES de cualquier operación pesada
+            await EnviarTelegram("🚀 *Servicio BCV Iniciado correctamente.*");
+            
             _logger.LogInformation("Worker iniciado. Sincronizando datos...");
 
             try
@@ -41,12 +50,20 @@ namespace Bcv.Worker
                     .Limit(1).Get();
 
                 _ultimaTasaLocal = respuesta.Models.FirstOrDefault();
+                
+                if (_ultimaTasaLocal != null)
+                {
+                     _logger.LogInformation("Última tasa en DB: USD {usd} ({fecha})", 
+                        _ultimaTasaLocal.Usd, _ultimaTasaLocal.FechaValor);
+                }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogWarning("No se pudo conectar a Supabase al inicio: {msg}", ex.Message);
                 _ultimaTasaLocal = LeerRespaldoLocal();
             }
 
+            // Primera ejecución
             await ProcesarTasas();
 
             while (!stoppingToken.IsCancellationRequested)
@@ -54,30 +71,24 @@ namespace Bcv.Worker
                 var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
                                TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
 
-                // Reiniciar el estado de notificación al cambiar de día
                 if (horaVzla.Day != _ultimoDiaProcesado)
                 {
                     _notificadoHoy = false;
                     _ultimoDiaProcesado = horaVzla.Day;
                 }
 
-                // Si estamos en horario y aún no hemos encontrado/notificado las tasas de hoy
                 if (EsHorarioPermitido(horaVzla) && !_notificadoHoy)
                 {
                     string mensajeReporte = $"⏰ Son las {horaVzla:hh:mm tt}, realizando consulta...";
                     await ProcesarTasas(mensajeReporte);
-
-                    // Esperar 1 hora para la siguiente consulta si aún no se ha notificado éxito
                     await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
                 }
                 else
                 {
-                    // Si ya se notificó hoy, el log indicará que se ahorra la consulta
                     if (_notificadoHoy && EsHorarioPermitido(horaVzla))
                     {
                         _logger.LogInformation("Tasas ya actualizadas hoy. Saltando consultas restantes.");
                     }
-
                     await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 }
             }
@@ -93,33 +104,53 @@ namespace Bcv.Worker
         {
             _logger.LogInformation("Consultando BCV...");
 
-            HtmlWeb web = new HtmlWeb
-            {
-                UserAgent = "Mozilla/5.0...",
-                Timeout = 30000
-            };
-
             try
             {
-                var oDoc = await Task.Run(() => web.Load("https://www.bcv.org.ve/"));
+                // 3. Solución al Deadlock/Bloqueo:
+                // En lugar de HtmlWeb.Load (síncrono), usamos HttpClient asíncrono.
+                var client = _httpClientFactory.CreateClient("BcvClient");
+                
+                // Descargamos el HTML como string (Async real)
+                var htmlContent = await client.GetStringAsync("https://www.bcv.org.ve/");
+                
+                // Cargamos el string en HtmlAgilityPack en memoria (es rapidísimo y seguro)
+                var oDoc = new HtmlDocument();
+                oDoc.LoadHtml(htmlContent);
+
                 var tasaActual = new TasaBcv
                 {
                     FechaValor = ExtraerTexto(oDoc, "//span[@class='date-display-single']"),
                     Usd = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='dolar']//strong")),
                     Eur = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='euro']//strong")),
                     CreadoEl = DateTime.UtcNow
-                    // ... otros campos
                 };
 
-                bool huboCambio = tasaActual.Usd > 0 &&
-                    (_ultimaTasaLocal == null || tasaActual.Usd != _ultimaTasaLocal.Usd || tasaActual.FechaValor != _ultimaTasaLocal.FechaValor);
+                // Lógica de detección de cambios...
+                bool tasaValida = tasaActual.Usd > 0;
+                
+                if (!tasaValida)
+                {
+                    _logger.LogWarning("Se descargó la página pero no se encontraron valores (posible cambio de diseño).");
+                    return;
+                }
+
+                bool huboCambio = (_ultimaTasaLocal == null || 
+                                   tasaActual.Usd != _ultimaTasaLocal.Usd || 
+                                   tasaActual.FechaValor != _ultimaTasaLocal.FechaValor);
 
                 if (huboCambio)
                 {
+                    _logger.LogInformation("¡Cambio detectado! USD: {usd}", tasaActual.Usd);
+                    
+                    // Guardar DB
                     await _supabase.From<TasaBcv>().Insert(tasaActual);
+                    
+                    // Guardar Local
                     GuardarRespaldoLocal(tasaActual);
+                    
+                    // Actualizar memoria
                     _ultimaTasaLocal = tasaActual;
-                    _notificadoHoy = true; // <--- Bloquea futuras consultas el mismo día
+                    _notificadoHoy = true;
 
                     await EnviarTelegram($"{(mensajeContexto ?? "✅ Tasas Actualizadas")}\n\n" +
                                          $"💵 *USD:* {tasaActual.Usd}\n" +
@@ -128,43 +159,52 @@ namespace Bcv.Worker
                 }
                 else if (!string.IsNullOrEmpty(mensajeContexto))
                 {
-                    // Solo enviamos mensaje de "no actualizado" si venimos del bucle horario (17h-20h)
                     await EnviarTelegram($"{mensajeContexto}\n\nℹ️ *Tasas aún no actualizadas en la página.*");
                 }
+                else 
+                {
+                    _logger.LogInformation("Sin cambios detectados.");
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                _logger.LogError("Timeout al intentar conectar con el BCV.");
+            }
+            catch (HttpRequestException httpEx)
+            {
+                _logger.LogError("Error de red al conectar con BCV: {msg}", httpEx.Message);
             }
             catch (Exception ex)
             {
-                _logger.LogError("Error en proceso: {msg}", ex.Message);
+                _logger.LogError("Error general procesando tasas: {msg}", ex.Message);
             }
-        }
-
-        // ... Mantener métodos ExtraerTexto, LimpiarYConvertir, EnviarTelegram, etc.
-        private string ExtraerTexto(HtmlDocument doc, string xpath) =>
-            doc.DocumentNode.SelectSingleNode(xpath)?.InnerText.Trim() ?? "N/D";
-
-        private decimal LimpiarYConvertir(string valor)
-        {
-            if (string.IsNullOrEmpty(valor) || valor == "N/D") return 0;
-            string limpio = valor.Replace(".", "").Replace(",", ".");
-            return decimal.TryParse(limpio, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal res) ? res : 0;
         }
 
         private async Task EnviarTelegram(string mensaje)
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); // Timeout de 10 seg
-                using var client = new HttpClient();
-
-                // Lee directamente de los User Secrets o AppSettings
                 string token = _config["Telegram:Token"] ?? "";
                 string chatId = _config["Telegram:ChatId"] ?? "";
 
                 if (string.IsNullOrEmpty(token)) return;
 
-                string url = $"https://api.telegram.org/bot{token}/sendMessage?chat_id={chatId}&parse_mode=Markdown&text={Uri.EscapeDataString(mensaje)}";
+                // 4. Usar Factory también para Telegram
+                var client = _httpClientFactory.CreateClient("TelegramClient");
+                
+                var content = new StringContent(
+                    System.Text.Json.JsonSerializer.Serialize(new 
+                    { 
+                        chat_id = chatId, 
+                        text = mensaje, 
+                        parse_mode = "Markdown" 
+                    }),
+                    Encoding.UTF8, 
+                    "application/json");
 
-                var response = await client.GetAsync(url, cts.Token);
+                // Usamos POST en lugar de GET por URL larga y seguridad
+                var response = await client.PostAsync($"https://api.telegram.org/bot{token}/sendMessage", content);
+
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogError("Telegram devolvió error: {code}", response.StatusCode);
@@ -174,6 +214,17 @@ namespace Bcv.Worker
             {
                 _logger.LogError("No se pudo enviar mensaje a Telegram: {msg}", ex.Message);
             }
+        }
+
+        // ... Métodos auxiliares (ExtraerTexto, LimpiarYConvertir, GuardarRespaldoLocal, LeerRespaldoLocal) se mantienen igual ...
+        private string ExtraerTexto(HtmlDocument doc, string xpath) =>
+             doc.DocumentNode.SelectSingleNode(xpath)?.InnerText.Trim() ?? "N/D";
+
+        private decimal LimpiarYConvertir(string valor)
+        {
+            if (string.IsNullOrEmpty(valor) || valor == "N/D") return 0;
+            string limpio = valor.Replace(".", "").Replace(",", ".");
+            return decimal.TryParse(limpio, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal res) ? res : 0;
         }
 
         private void GuardarRespaldoLocal(TasaBcv tasa)
@@ -197,8 +248,6 @@ namespace Bcv.Worker
             }
             catch { return null; }
         }
-
-
     }
 }
 
