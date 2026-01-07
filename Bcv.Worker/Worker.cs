@@ -10,19 +10,30 @@ namespace Bcv.Worker
         private readonly ILogger<Worker> _logger;
         private readonly Supabase.Client _supabase;
         private TasaBcv? _ultimaTasaLocal;
+        private readonly IConfiguration _config;
 
-        public Worker(ILogger<Worker> logger, Supabase.Client supabase)
+        // Control de notificaciones
+        private bool _notificadoHoy = false;
+        private int _ultimoDiaProcesado = -1;
+
+        public Worker(ILogger<Worker> logger, Supabase.Client supabase, IConfiguration config)
         {
             _logger = logger;
             _supabase = supabase;
+            _config = config; // Ahora leemos los secretos desde aquí
+        }
+
+        // Se ejecuta cuando el servicio se detiene o se cierra
+        public override async Task StopAsync(CancellationToken cancellationToken)
+        {
+            await EnviarTelegram("🛑 *El servicio BCV se ha cerrado o está inactivo.*");
+            await base.StopAsync(cancellationToken);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            
             _logger.LogInformation("Worker iniciado. Sincronizando datos...");
 
-            // 1. Intentamos sincronización inicial con la nube o local
             try
             {
                 var respuesta = await _supabase.From<TasaBcv>()
@@ -31,148 +42,103 @@ namespace Bcv.Worker
 
                 _ultimaTasaLocal = respuesta.Models.FirstOrDefault();
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogWarning("Fallo conexión nube al iniciar. Buscando respaldo local...");
                 _ultimaTasaLocal = LeerRespaldoLocal();
             }
 
-            // 2. Realizamos la primera consulta al BCV de inmediato
             await ProcesarTasas();
 
-            var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
-               TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
-
-            // 3. Enviamos el reporte de inicio con las tasas actuales encontradas
-            string mensajeInicio = "🚀 *Servicio BCV Iniciado*\n\n" +
-                      $"💵 *USD:* {(_ultimaTasaLocal?.Usd.ToString() ?? "N/D")}\n" +
-                      $"📅 *Fecha BCV:* {(_ultimaTasaLocal?.FechaValor ?? "N/D")}\n" +
-                      $"⏰ *Hora Local:* {horaVzla.ToString("hh:mm tt")}\n\n" +
-                      "🔍 El worker está activo y monitoreando.";
-
-            await EnviarTelegram(mensajeInicio);
-
-            // 4. Entramos en el bucle de espera inteligente
             while (!stoppingToken.IsCancellationRequested)
             {
-                var horaVzla1 = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
                                TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
 
-                if (EsHorarioPermitido(horaVzla1))
+                // Reiniciar el estado de notificación al cambiar de día
+                if (horaVzla.Day != _ultimoDiaProcesado)
                 {
-                    await ProcesarTasas();
-                    // Esperamos 1 hora dentro del bloque de horario de publicación
+                    _notificadoHoy = false;
+                    _ultimoDiaProcesado = horaVzla.Day;
+                }
+
+                // Si estamos en horario y aún no hemos encontrado/notificado las tasas de hoy
+                if (EsHorarioPermitido(horaVzla) && !_notificadoHoy)
+                {
+                    string mensajeReporte = $"⏰ Son las {horaVzla:hh:mm tt}, realizando consulta...";
+                    await ProcesarTasas(mensajeReporte);
+
+                    // Esperar 1 hora para la siguiente consulta si aún no se ha notificado éxito
                     await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
                 }
                 else
                 {
-                    _logger.LogInformation("Fuera de horario (Hora Vzla: {hora}). Esperando...", horaVzla1.ToString("HH:mm"));
+                    // Si ya se notificó hoy, el log indicará que se ahorra la consulta
+                    if (_notificadoHoy && EsHorarioPermitido(horaVzla))
+                    {
+                        _logger.LogInformation("Tasas ya actualizadas hoy. Saltando consultas restantes.");
+                    }
+
                     await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 }
             }
         }
 
-        private bool EsHorarioPermitido(DateTime dt)
+        private bool EsHorarioPermitido(DateTime horaVzla)
         {
-            // Convertimos la hora actual a la hora oficial de Venezuela
-            var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
-                           TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
-
-            // Lunes a Viernes
             bool esDiaLaboral = horaVzla.DayOfWeek != DayOfWeek.Saturday && horaVzla.DayOfWeek != DayOfWeek.Sunday;
-
-            // Ventana de publicación del BCV (usando la hora de Venezuela calculada)
             return esDiaLaboral && horaVzla.Hour >= 17 && horaVzla.Hour <= 20;
         }
 
-        private async Task ProcesarTasas()
+        private async Task ProcesarTasas(string? mensajeContexto = null)
         {
             _logger.LogInformation("Consultando BCV...");
 
             HtmlWeb web = new HtmlWeb
             {
-                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                UserAgent = "Mozilla/5.0...",
                 Timeout = 30000
             };
 
-            int reintentosMaximos = 3;
-            int intentoActual = 0;
-            bool exito = false;
-
-            while (intentoActual < reintentosMaximos && !exito)
+            try
             {
-                try
+                var oDoc = await Task.Run(() => web.Load("https://www.bcv.org.ve/"));
+                var tasaActual = new TasaBcv
                 {
-                    intentoActual++;
-                    var oDoc = await Task.Run(() => web.Load("https://www.bcv.org.ve/"));
+                    FechaValor = ExtraerTexto(oDoc, "//span[@class='date-display-single']"),
+                    Usd = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='dolar']//strong")),
+                    Eur = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='euro']//strong")),
+                    CreadoEl = DateTime.UtcNow
+                    // ... otros campos
+                };
 
-                    var tasaActual = new TasaBcv
-                    {
-                        FechaValor = ExtraerTexto(oDoc, "//span[@class='date-display-single']"),
-                        Usd = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='dolar']//strong")),
-                        Eur = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='euro']//strong")),
-                        Cny = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='yuan']//strong")),
-                        Try = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='lira']//strong")),
-                        Rub = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='rublo']//strong")),
-                        CreadoEl = DateTime.UtcNow
-                    };
+                bool huboCambio = tasaActual.Usd > 0 &&
+                    (_ultimaTasaLocal == null || tasaActual.Usd != _ultimaTasaLocal.Usd || tasaActual.FechaValor != _ultimaTasaLocal.FechaValor);
 
-                    if (_ultimaTasaLocal == null)
-                    {
-                        try
-                        {
-                            var respuesta = await _supabase.From<TasaBcv>()
-                                .Order("creado_el", Postgrest.Constants.Ordering.Descending)
-                                .Limit(1).Get();
-                            _ultimaTasaLocal = respuesta.Models.FirstOrDefault();
-                        }
-                        catch
-                        {
-                            _ultimaTasaLocal = LeerRespaldoLocal();
-                        }
-                    }
+                if (huboCambio)
+                {
+                    await _supabase.From<TasaBcv>().Insert(tasaActual);
+                    GuardarRespaldoLocal(tasaActual);
+                    _ultimaTasaLocal = tasaActual;
+                    _notificadoHoy = true; // <--- Bloquea futuras consultas el mismo día
 
-                    // Comparación de cambios
-                    if (tasaActual.Usd > 0 && (_ultimaTasaLocal == null || tasaActual.Usd != _ultimaTasaLocal.Usd || tasaActual.FechaValor != _ultimaTasaLocal.FechaValor))
-                    {
-                        _logger.LogInformation("Guardando cambio detectado: USD {usd}", tasaActual.Usd);
-                        await _supabase.From<TasaBcv>().Insert(tasaActual);
-                        GuardarRespaldoLocal(tasaActual);
-                        _ultimaTasaLocal = tasaActual;
-
-                        // Capturamos la hora exacta de detección en Venezuela
-                        var horaDeteccion = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
-                                            TimeZoneInfo.FindSystemTimeZoneById("Venezuela Standard Time"));
-
-                        await EnviarTelegram($"✅ *Nueva Tasa BCV Detectada*\n\n" +
-                                             $"💵 *USD:* {tasaActual.Usd}\n" +
-                                             $"💶 *EUR:* {tasaActual.Eur}\n" +
-                                             $"📅 *Fecha BCV:* {tasaActual.FechaValor}\n" +
-                                             $"⏰ *Hora Detección:* {horaDeteccion.ToString("hh:mm tt")}");
-                    }
-                    else
-                    {
-                        _logger.LogWarning(">>> Sin cambios detectados <<<");
-                        _logger.LogInformation("BCV actual -> USD: {usd} | EUR: {eur} | Fecha: {fecha}",
-                            tasaActual.Usd, tasaActual.Eur, tasaActual.FechaValor);
-                    }
-
-                    exito = true;
+                    await EnviarTelegram($"{(mensajeContexto ?? "✅ Tasas Actualizadas")}\n\n" +
+                                         $"💵 *USD:* {tasaActual.Usd}\n" +
+                                         $"💶 *EUR:* {tasaActual.Eur}\n" +
+                                         $"📅 *Fecha BCV:* {tasaActual.FechaValor}");
                 }
-                catch (Exception ex)
+                else if (!string.IsNullOrEmpty(mensajeContexto))
                 {
-                    _logger.LogWarning("Intento {n} fallido: {msg}", intentoActual, ex.Message);
-                    if (intentoActual < reintentosMaximos)
-                    {
-                        await Task.Delay(10000);
-                    }
-                    else
-                    {
-                        await EnviarTelegram("⚠️ *ALERTA:* El servicio falló tras 3 intentos. Revisa la conexión.");
-                    }
+                    // Solo enviamos mensaje de "no actualizado" si venimos del bucle horario (17h-20h)
+                    await EnviarTelegram($"{mensajeContexto}\n\nℹ️ *Tasas aún no actualizadas en la página.*");
                 }
             }
+            catch (Exception ex)
+            {
+                _logger.LogError("Error en proceso: {msg}", ex.Message);
+            }
         }
+
+        // ... Mantener métodos ExtraerTexto, LimpiarYConvertir, EnviarTelegram, etc.
         private string ExtraerTexto(HtmlDocument doc, string xpath) =>
             doc.DocumentNode.SelectSingleNode(xpath)?.InnerText.Trim() ?? "N/D";
 
@@ -187,22 +153,26 @@ namespace Bcv.Worker
         {
             try
             {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); // Timeout de 10 seg
                 using var client = new HttpClient();
-                // Leemos desde el archivo de configuración appsettings.json
-                var config = new ConfigurationBuilder()
-                    .SetBasePath(AppContext.BaseDirectory)
-                    .AddJsonFile("appsettings.json")
-                    .Build();
 
-                string token = config["Telegram:Token"];
-                string chatId = config["Telegram:ChatId"];
+                // Lee directamente de los User Secrets o AppSettings
+                string token = _config["Telegram:Token"] ?? "";
+                string chatId = _config["Telegram:ChatId"] ?? "";
+
+                if (string.IsNullOrEmpty(token)) return;
 
                 string url = $"https://api.telegram.org/bot{token}/sendMessage?chat_id={chatId}&parse_mode=Markdown&text={Uri.EscapeDataString(mensaje)}";
-                await client.GetAsync(url);
+
+                var response = await client.GetAsync(url, cts.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogError("Telegram devolvió error: {code}", response.StatusCode);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError("Error enviando notificación a Telegram: {msg}", ex.Message);
+                _logger.LogError("No se pudo enviar mensaje a Telegram: {msg}", ex.Message);
             }
         }
 
@@ -228,6 +198,9 @@ namespace Bcv.Worker
             catch { return null; }
         }
 
-     
+
     }
 }
+
+
+
