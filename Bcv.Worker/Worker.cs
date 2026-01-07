@@ -154,18 +154,28 @@ namespace Bcv.Worker
                 var oDoc = new HtmlDocument();
                 oDoc.LoadHtml(htmlContent);
 
+                // Extracción de todas las tasas disponibles en el portal del BCV
                 var tasaActual = new TasaBcv
                 {
                     FechaValor = ExtraerTexto(oDoc, "//span[@class='date-display-single']"),
                     Usd = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='dolar']//strong")),
                     Eur = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='euro']//strong")),
+                    Cny = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='yuan']//strong")),
+                    Try = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='lira']//strong")),
+                    Rub = LimpiarYConvertir(ExtraerTexto(oDoc, "//div[@id='rublo']//strong")),
                     CreadoEl = DateTime.UtcNow
                 };
 
-                if (tasaActual.Usd <= 0) return;
+                // Validación mínima: si no hay USD, algo falló en la descarga
+                if (tasaActual.Usd <= 0)
+                {
+                    _logger.LogWarning("No se pudo obtener la tasa base (USD). Abortando guardado.");
+                    return;
+                }
 
-                _logger.LogInformation("🔍 Tasas en página -> USD: {usd} | EUR: {eur}", tasaActual.Usd, tasaActual.Eur);
+                _logger.LogInformation("🔍 Tasas obtenidas -> USD: {usd} | EUR: {eur} | CNY: {cny}", tasaActual.Usd, tasaActual.Eur, tasaActual.Cny);
 
+                // Verificamos si hubo cambios en la fecha o en el valor del dólar
                 bool huboCambio = (_ultimaTasaLocal == null ||
                                    tasaActual.Usd != _ultimaTasaLocal.Usd ||
                                    tasaActual.FechaValor != _ultimaTasaLocal.FechaValor);
@@ -180,7 +190,10 @@ namespace Bcv.Worker
                 if (huboCambio)
                 {
                     _logger.LogInformation("✅ ¡Cambio detectado! Actualizando Supabase.");
+
+                    // Insertar el objeto completo con todas las monedas
                     await _supabase.From<TasaBcv>().Insert(tasaActual);
+
                     GuardarRespaldoLocal(tasaActual);
                     _ultimaTasaLocal = tasaActual;
                     _notificadoHoy = true;
@@ -189,16 +202,20 @@ namespace Bcv.Worker
                 }
                 else
                 {
-                    _logger.LogInformation(" Sin cambios. Manteniendo silencio en Telegram.");
+                    _logger.LogInformation("Sin cambios. Manteniendo silencio.");
                     sbTelegram.AppendLine(" *Sin cambios detectados respecto a la última tasa.*");
                 }
 
+                // Construcción del mensaje para Telegram incluyendo las nuevas monedas
                 sbTelegram.AppendLine();
                 sbTelegram.AppendLine($"💵 *USD:* {tasaActual.Usd}");
                 sbTelegram.AppendLine($"💶 *EUR:* {tasaActual.Eur}");
+                sbTelegram.AppendLine($"🇨🇳 *CNY:* {tasaActual.Cny}");
+                sbTelegram.AppendLine($"🇹🇷 *TRY:* {tasaActual.Try}");
+                sbTelegram.AppendLine($"🇷🇺 *RUB:* {tasaActual.Rub}");
                 sbTelegram.AppendLine($"📅 *Fecha BCV:* {tasaActual.FechaValor}");
 
-                // ENVÍO INTELIGENTE: Solo si hubo cambio O si es el reporte de las 5 PM (mensajeContexto)
+                // Envío a Telegram si hubo cambio o si es el monitoreo programado
                 if (huboCambio || !string.IsNullOrEmpty(mensajeContexto))
                 {
                     await EnviarTelegram(sbTelegram.ToString());
@@ -206,7 +223,7 @@ namespace Bcv.Worker
             }
             catch (Exception ex)
             {
-                _logger.LogError("❌ Error en proceso: {msg}", ex.Message);
+                _logger.LogError("❌ Error en proceso de extracción: {msg}", ex.Message);
             }
         }
 
