@@ -1,8 +1,8 @@
 ﻿using Bcv.Shared;
 using HtmlAgilityPack;
 using Supabase;
-using System.Net.Http;
 using System.Text;
+using System.Net.Http;
 
 namespace Bcv.Worker
 {
@@ -11,18 +11,18 @@ namespace Bcv.Worker
         private readonly ILogger<Worker> _logger;
         private readonly Supabase.Client _supabase;
         private readonly IConfiguration _config;
-        private readonly IHttpClientFactory _httpClientFactory; // 1. Usar Factory
+        private readonly IHttpClientFactory _httpClientFactory;
         private TasaBcv? _ultimaTasaLocal;
 
-        // Control de notificaciones
+        // Control de notificaciones para evitar spam
         private bool _notificadoHoy = false;
         private int _ultimoDiaProcesado = -1;
 
         public Worker(
-            ILogger<Worker> logger, 
-            Supabase.Client supabase, 
+            ILogger<Worker> logger,
+            Supabase.Client supabase,
             IConfiguration config,
-            IHttpClientFactory httpClientFactory) // Inyección del Factory
+            IHttpClientFactory httpClientFactory)
         {
             _logger = logger;
             _supabase = supabase;
@@ -30,19 +30,24 @@ namespace Bcv.Worker
             _httpClientFactory = httpClientFactory;
         }
 
+        // PETICIÓN: Mensaje cuando el servicio se detiene
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
-            await EnviarTelegram("🛑 *El servicio BCV se ha cerrado o está inactivo.*");
+            _logger.LogWarning("Deteniendo el servicio...");
+            
+            // Aquí es donde aplicamos la corrección:
+            // Al usar CancellationToken.None, evitamos que la librería HTTP cancele la petición
+            // inmediatamente porque detecta que el host se está cerrando.
+            await EnviarTelegram("🛑 *El servicio BCV se ha cerrado o está inactivo.*", CancellationToken.None);
+            
             await base.StopAsync(cancellationToken);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            // 2. Notificar inicio ANTES de cualquier operación pesada
-            await EnviarTelegram("🚀 *Servicio BCV Iniciado correctamente.*");
-            
             _logger.LogInformation("Worker iniciado. Sincronizando datos...");
 
+            // 1. Sincronización inicial
             try
             {
                 var respuesta = await _supabase.From<TasaBcv>()
@@ -50,22 +55,33 @@ namespace Bcv.Worker
                     .Limit(1).Get();
 
                 _ultimaTasaLocal = respuesta.Models.FirstOrDefault();
-                
-                if (_ultimaTasaLocal != null)
-                {
-                     _logger.LogInformation("Última tasa en DB: USD {usd} ({fecha})", 
-                        _ultimaTasaLocal.Usd, _ultimaTasaLocal.FechaValor);
-                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("No se pudo conectar a Supabase al inicio: {msg}", ex.Message);
+                _logger.LogWarning("Fallo conexión con Supabase. Usando respaldo local: {msg}", ex.Message);
                 _ultimaTasaLocal = LeerRespaldoLocal();
             }
 
-            // Primera ejecución
+            // 2. PETICIÓN: Reporte Detallado de Inicio con tasas actuales
+            var sbInicio = new StringBuilder();
+            sbInicio.AppendLine("🚀 *Servicio BCV Iniciado*");
+            if (_ultimaTasaLocal != null)
+            {
+                sbInicio.AppendLine("📉 *Últimos valores registrados:*");
+                sbInicio.AppendLine($"💵 *USD:* {_ultimaTasaLocal.Usd}");
+                sbInicio.AppendLine($"💶 *EUR:* {_ultimaTasaLocal.Eur}");
+                sbInicio.AppendLine($"📅 *Fecha:* {_ultimaTasaLocal.FechaValor}");
+            }
+            else
+            {
+                sbInicio.AppendLine("⚠️ *Estado:* Sin datos previos registrados.");
+            }
+            await EnviarTelegram(sbInicio.ToString());
+
+            // 3. Primera ejecución inmediata
             await ProcesarTasas();
 
+            // 4. Bucle principal de monitoreo
             while (!stoppingToken.IsCancellationRequested)
             {
                 var horaVzla = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
@@ -77,18 +93,39 @@ namespace Bcv.Worker
                     _ultimoDiaProcesado = horaVzla.Day;
                 }
 
-                if (EsHorarioPermitido(horaVzla) && !_notificadoHoy)
+                if (EsHorarioPermitido(horaVzla))
                 {
-                    string mensajeReporte = $"⏰ Son las {horaVzla:hh:mm tt}, realizando consulta...";
-                    await ProcesarTasas(mensajeReporte);
-                    await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
+                    if (!_notificadoHoy)
+                    {
+                        // Si es exactamente la hora de inicio (5:00 PM), enviamos el primer reporte con texto.
+                        // Usamos una ventana de 20 min para el primer mensaje.
+                        if (horaVzla.Hour == 17 && horaVzla.Minute < 20)
+                        {
+                            string mensajeContexto = $"⏰ *Son las {horaVzla:hh:mm tt}, iniciando monitoreo intensivo...*";
+                            await ProcesarTasas(mensajeContexto);
+                        }
+                        else
+                        {
+                            // Consultas silenciosas cada 20 minutos (sin pasar mensajeContexto)
+                            await ProcesarTasas(null);
+                        }
+
+                        // Si después de la consulta aún no hay tasa nueva, esperamos solo 20 minutos
+                        if (!_notificadoHoy)
+                        {
+                            _logger.LogInformation("Esperando 20 minutos para la siguiente consulta silenciosa...");
+                            await Task.Delay(TimeSpan.FromMinutes(20), stoppingToken);
+                        }
+                    }
+                    else
+                    {
+                        // Tasa ya encontrada, esperar 30 min antes de volver a chequear el reloj (ahorro de recursos)
+                        await Task.Delay(TimeSpan.FromMinutes(30), stoppingToken);
+                    }
                 }
                 else
                 {
-                    if (_notificadoHoy && EsHorarioPermitido(horaVzla))
-                    {
-                        _logger.LogInformation("Tasas ya actualizadas hoy. Saltando consultas restantes.");
-                    }
+                    // Fuera de horario (antes de las 5pm o después de las 8pm)
                     await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 }
             }
@@ -102,21 +139,21 @@ namespace Bcv.Worker
 
         private async Task ProcesarTasas(string? mensajeContexto = null)
         {
-            _logger.LogInformation("Consultando BCV...");
+            // Log informativo en la consola del Worker
+            _logger.LogInformation("Consultando BCV (Modo Intensivo)...");
 
             try
             {
-                // 3. Solución al Deadlock/Bloqueo:
-                // En lugar de HtmlWeb.Load (síncrono), usamos HttpClient asíncrono.
+                // Uso de IHttpClientFactory para evitar bloqueos y mejorar el rendimiento
                 var client = _httpClientFactory.CreateClient("BcvClient");
-                
-                // Descargamos el HTML como string (Async real)
+
+                // Descarga asíncrona del contenido de la página oficial del BCV
                 var htmlContent = await client.GetStringAsync("https://www.bcv.org.ve/");
-                
-                // Cargamos el string en HtmlAgilityPack en memoria (es rapidísimo y seguro)
+
                 var oDoc = new HtmlDocument();
                 oDoc.LoadHtml(htmlContent);
 
+                // Extracción de los valores de las tasas principales
                 var tasaActual = new TasaBcv
                 {
                     FechaValor = ExtraerTexto(oDoc, "//span[@class='date-display-single']"),
@@ -125,98 +162,106 @@ namespace Bcv.Worker
                     CreadoEl = DateTime.UtcNow
                 };
 
-                // Lógica de detección de cambios...
-                bool tasaValida = tasaActual.Usd > 0;
-                
-                if (!tasaValida)
+                // Verificación de seguridad para asegurar que la página cargó correctamente los datos
+                if (tasaActual.Usd <= 0)
                 {
-                    _logger.LogWarning("Se descargó la página pero no se encontraron valores (posible cambio de diseño).");
+                    _logger.LogWarning("⚠️ No se pudieron extraer tasas válidas de la página.");
                     return;
                 }
 
-                bool huboCambio = (_ultimaTasaLocal == null || 
-                                   tasaActual.Usd != _ultimaTasaLocal.Usd || 
+                // Siempre imprimimos el hallazgo en la consola para monitoreo local
+                _logger.LogInformation("🔍 Tasas en página -> USD: {usd} | EUR: {eur} | Fecha: {fecha}",
+                    tasaActual.Usd, tasaActual.Eur, tasaActual.FechaValor);
+
+                // Determinamos si los valores obtenidos son diferentes a los últimos registrados
+                bool huboCambio = (_ultimaTasaLocal == null ||
+                                   tasaActual.Usd != _ultimaTasaLocal.Usd ||
                                    tasaActual.FechaValor != _ultimaTasaLocal.FechaValor);
+
+                var sbTelegram = new StringBuilder();
+
+                // Si el método recibe un mensaje de contexto (ej. el reporte de las 5pm), se añade
+                if (!string.IsNullOrEmpty(mensajeContexto))
+                {
+                    sbTelegram.AppendLine(mensajeContexto);
+                    sbTelegram.AppendLine();
+                }
 
                 if (huboCambio)
                 {
-                    _logger.LogInformation("¡Cambio detectado! USD: {usd}", tasaActual.Usd);
-                    
-                    // Guardar DB
+                    _logger.LogInformation("✅ ¡Cambio detectado! Actualizando registros...");
+
+                    // Persistencia en Supabase y respaldo local
                     await _supabase.From<TasaBcv>().Insert(tasaActual);
-                    
-                    // Guardar Local
                     GuardarRespaldoLocal(tasaActual);
-                    
-                    // Actualizar memoria
                     _ultimaTasaLocal = tasaActual;
+
+                    // Activamos la bandera para detener las consultas por el resto del día
                     _notificadoHoy = true;
 
-                    await EnviarTelegram($"{(mensajeContexto ?? "✅ Tasas Actualizadas")}\n\n" +
-                                         $"💵 *USD:* {tasaActual.Usd}\n" +
-                                         $"💶 *EUR:* {tasaActual.Eur}\n" +
-                                         $"📅 *Fecha BCV:* {tasaActual.FechaValor}");
+                    sbTelegram.AppendLine("✅ *¡Nueva Tasa Detectada!*");
                 }
-                else if (!string.IsNullOrEmpty(mensajeContexto))
+                else
                 {
-                    await EnviarTelegram($"{mensajeContexto}\n\nℹ️ *Tasas aún no actualizadas en la página.*");
+                    // Si no hay cambios, el bot solo informará si mensajeContexto no es nulo (Consulta de las 5pm)
+                    _logger.LogInformation("ℹ️ Sin cambios. Manteniendo silencio en Telegram.");
+                    sbTelegram.AppendLine("ℹ️ *Sin cambios detectados respecto a la última tasa.*");
                 }
-                else 
+
+                // Se adjuntan los detalles de las tasas al mensaje
+                sbTelegram.AppendLine();
+                sbTelegram.AppendLine($"💵 *USD:* {tasaActual.Usd}");
+                sbTelegram.AppendLine($"💶 *EUR:* {tasaActual.Eur}");
+                sbTelegram.AppendLine($"📅 *Fecha BCV:* {tasaActual.FechaValor}");
+
+                // LÓGICA DE ENVÍO SILENCIOSO:
+                // Solo enviamos a Telegram si hubo un cambio real O si se proporcionó un mensaje de contexto
+                if (huboCambio || !string.IsNullOrEmpty(mensajeContexto))
                 {
-                    _logger.LogInformation("Sin cambios detectados.");
+                    await EnviarTelegram(sbTelegram.ToString());
                 }
-            }
-            catch (TaskCanceledException)
-            {
-                _logger.LogError("Timeout al intentar conectar con el BCV.");
-            }
-            catch (HttpRequestException httpEx)
-            {
-                _logger.LogError("Error de red al conectar con BCV: {msg}", httpEx.Message);
             }
             catch (Exception ex)
             {
-                _logger.LogError("Error general procesando tasas: {msg}", ex.Message);
+                // Captura de errores de red o de procesamiento para evitar que el Worker se detenga
+                _logger.LogError("❌ Error en proceso de tasas: {msg}", ex.Message);
             }
         }
 
-        private async Task EnviarTelegram(string mensaje)
+        // Modifica la firma para aceptar el CancellationToken (opcional con default)
+        private async Task EnviarTelegram(string mensaje, CancellationToken cancellationToken = default)
         {
             try
             {
                 string token = _config["Telegram:Token"] ?? "";
                 string chatId = _config["Telegram:ChatId"] ?? "";
-
                 if (string.IsNullOrEmpty(token)) return;
 
-                // 4. Usar Factory también para Telegram
                 var client = _httpClientFactory.CreateClient("TelegramClient");
+                var payload = new { chat_id = chatId, text = mensaje, parse_mode = "Markdown" };
                 
                 var content = new StringContent(
-                    System.Text.Json.JsonSerializer.Serialize(new 
-                    { 
-                        chat_id = chatId, 
-                        text = mensaje, 
-                        parse_mode = "Markdown" 
-                    }),
+                    System.Text.Json.JsonSerializer.Serialize(payload), 
                     Encoding.UTF8, 
                     "application/json");
 
-                // Usamos POST en lugar de GET por URL larga y seguridad
-                var response = await client.PostAsync($"https://api.telegram.org/bot{token}/sendMessage", content);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogError("Telegram devolvió error: {code}", response.StatusCode);
-                }
+                // IMPORTANTE: Pasar el cancellationToken aquí
+                await client.PostAsync(
+                    $"https://api.telegram.org/bot{token}/sendMessage", 
+                    content, 
+                    cancellationToken);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException) 
             {
-                _logger.LogError("No se pudo enviar mensaje a Telegram: {msg}", ex.Message);
+                // Ignoramos errores de cancelación durante el apagado para no ensuciar el log
+                _logger.LogWarning("Envío a Telegram cancelado por cierre del host.");
+            }
+            catch (Exception ex) 
+            { 
+                _logger.LogError("Fallo Telegram: {msg}", ex.Message); 
             }
         }
 
-        // ... Métodos auxiliares (ExtraerTexto, LimpiarYConvertir, GuardarRespaldoLocal, LeerRespaldoLocal) se mantienen igual ...
         private string ExtraerTexto(HtmlDocument doc, string xpath) =>
              doc.DocumentNode.SelectSingleNode(xpath)?.InnerText.Trim() ?? "N/D";
 
@@ -234,7 +279,7 @@ namespace Bcv.Worker
                 string path = Path.Combine(AppContext.BaseDirectory, "ultima_tasa.txt");
                 File.WriteAllText(path, $"{tasa.Usd}|{tasa.Eur}|{tasa.FechaValor}");
             }
-            catch (Exception ex) { _logger.LogError("Error guardando local: {msg}", ex.Message); }
+            catch { }
         }
 
         private TasaBcv? LeerRespaldoLocal()
@@ -250,6 +295,3 @@ namespace Bcv.Worker
         }
     }
 }
-
-
-

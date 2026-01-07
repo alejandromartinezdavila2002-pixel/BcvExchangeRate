@@ -47,5 +47,12 @@ builder.Services.AddHttpClient("TelegramClient", client =>
 // 4. REGISTRO DEL WORKER PRINCIPAL
 builder.Services.AddHostedService<Worker>();
 
+builder.Services.Configure<HostOptions>(hostOptions =>
+{
+    // Aumentamos el tiempo de espera de cierre de 5s (default) a 15s
+    hostOptions.ShutdownTimeout = TimeSpan.FromSeconds(15);
+});
+
 var host = builder.Build();
 host.Run();
+
