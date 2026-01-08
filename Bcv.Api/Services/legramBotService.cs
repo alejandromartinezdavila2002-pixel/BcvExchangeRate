@@ -49,7 +49,7 @@ namespace Bcv.Api.Services
                 await supabase.From<ClienteApi>().Where(x => x.ApiKey == key)
                     .Set(x => x.EstaAprobado, true).Update();
 
-                await botClient.SendTextMessageAsync(chatId, $"✅ Cliente con Key {key} aprobado.");
+                await botClient.SendMessage(chatId, $"✅ Cliente con Key {key} aprobado.", cancellationToken: ct);
             }
             // Puedes agregar /bloquear, /listar, etc.
         }

@@ -27,6 +27,7 @@ public class TasasController : ControllerBase
         {
             // Aquí podrías usar un Logger profesional más adelante
             return StatusCode(500, new { error = "Ocurrió un error interno al procesar la solicitud." });
+            
         }
     }
 }
