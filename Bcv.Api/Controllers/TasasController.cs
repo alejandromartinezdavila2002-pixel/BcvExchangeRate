@@ -1,41 +1,32 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Bcv.Api.Services;
 using Bcv.Shared;
-using Supabase;
+using Microsoft.AspNetCore.Mvc;
 
-namespace Bcv.Api.Controllers
+[ApiController]
+[Route("api/[controller]")]
+public class TasasController : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class TasasController : ControllerBase
+    private readonly ITasaService _tasaService;
+
+    public TasasController(ITasaService tasaService)
     {
-        private readonly Supabase.Client _supabase;
+        _tasaService = tasaService;
+    }
 
-        public TasasController(Supabase.Client supabase)
+    [HttpGet("ultima")]
+    public async Task<ActionResult<TasaBcv>> GetUltimaTasa()
+    {
+        try
         {
-            _supabase = supabase;
+            var tasa = await _tasaService.GetUltimaTasaAsync();
+            if (tasa == null) return NotFound();
+
+            return Ok(tasa);
         }
-
-        [HttpGet("ultima")]
-        public async Task<ActionResult<TasaBcv>> GetUltimaTasa()
+        catch (Exception ex)
         {
-            try
-            {
-                // Al heredar TasaBcv de BaseModel, este .From<TasaBcv>() ya no dará error
-                var respuesta = await _supabase.From<TasaBcv>()
-                    .Order("creado_el", Postgrest.Constants.Ordering.Descending)
-                    .Limit(1)
-                    .Get();
-
-                var tasa = respuesta.Models.FirstOrDefault();
-
-                if (tasa == null) return NotFound();
-
-                return Ok(tasa); // Gracias al [JsonIgnore], esto ya no dará Error 500
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { error = ex.Message });
-            }
+            // Aquí podrías usar un Logger profesional más adelante
+            return StatusCode(500, new { error = "Ocurrió un error interno al procesar la solicitud." });
         }
     }
 }

@@ -1,54 +1,49 @@
+using Bcv.Api.Services;
+using Bcv.Api.Middleware; // Asegúrate de que el namespace coincida
 using Supabase;
-using System.Reflection; // Necesario para PropertyInfo
-using System.Text.Json.Serialization.Metadata; // Necesario para IJsonTypeInfoResolver
+using System.Reflection;
+using System.Text.Json.Serialization.Metadata;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Agregar configuración de Supabase
+// --- 1. CONFIGURACIÓN DE SERVICIOS (builder.Services) ---
+
+// Configuración de Supabase
 var supabaseUrl = builder.Configuration["Supabase:Url"];
 var supabaseKey = builder.Configuration["Supabase:Key"];
 
-// Registrar el cliente para Inyección de Dependencias
-builder.Services.AddScoped(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
+if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(supabaseKey))
+{
+    throw new InvalidOperationException("No se encontraron las credenciales de Supabase. Verifique los User Secrets.");
+}
 
+// Registro de dependencias
+builder.Services.AddScoped(_ => new Supabase.Client(supabaseUrl!, supabaseKey!));
+builder.Services.AddScoped<ITasaService, TasaService>();
+builder.Services.AddHostedService<TelegramBotService>();
+
+// Configuración de Controladores y JSON
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
-        // Esto evita que el serializador se rompa con tipos complejos circulares o internos
         options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
         options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
-        
-        // SOLUCIÓN: Agregar un modificador para ignorar propiedades de la clase base (BaseModel)
+
         options.JsonSerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver
         {
             Modifiers = { IgnoreBaseModelProperties }
         };
     });
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Definición del modificador (puedes ponerlo al final del archivo o en una clase estática)
-static void IgnoreBaseModelProperties(JsonTypeInfo typeInfo)
-{
-    // Solo aplicamos la lógica si la clase hereda de BaseModel
-    if (typeof(Postgrest.Models.BaseModel).IsAssignableFrom(typeInfo.Type))
-    {
-        // Recorremos las propiedades detectadas
-        foreach (var property in typeInfo.Properties)
-        {
-            // Si la propiedad fue declarada en BaseModel (y no en tu clase TasaBcv), la ignoramos
-            if (property.AttributeProvider is PropertyInfo pi && 
-                pi.DeclaringType == typeof(Postgrest.Models.BaseModel))
-            {
-                property.ShouldSerialize = (_, _) => false;
-            }
-        }
-    }
-}
+// --- 2. CONSTRUCCIÓN DE LA APLICACIÓN ---
 
 var app = builder.Build();
 
-// Configurar el pipeline de HTTP
+// --- 3. CONFIGURACIÓN DEL PIPELINE HTTP (Middleware - EL ORDEN IMPORTA) ---
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -56,7 +51,30 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// El Middleware de ApiKey debe ir ANTES de los controladores para protegerlos
+app.UseMiddleware<ApiKeyMiddleware>();
+
 app.UseAuthorization();
 app.MapControllers();
 
+// --- 4. EJECUCIÓN ---
+
 app.Run();
+
+// --- MÉTODOS ESTÁTICOS ---
+
+static void IgnoreBaseModelProperties(JsonTypeInfo typeInfo)
+{
+    if (typeof(Postgrest.Models.BaseModel).IsAssignableFrom(typeInfo.Type))
+    {
+        foreach (var property in typeInfo.Properties)
+        {
+            if (property.AttributeProvider is PropertyInfo pi &&
+                pi.DeclaringType == typeof(Postgrest.Models.BaseModel))
+            {
+                property.ShouldSerialize = (_, _) => false;
+            }
+        }
+    }
+}
