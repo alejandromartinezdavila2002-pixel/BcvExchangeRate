@@ -22,16 +22,39 @@ namespace Bcv.Api.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            // Estos valores deben venir del "secrets.json" de la API, no del Worker
             var token = _config["Telegram:Token"];
-            if (string.IsNullOrEmpty(token)) return;
+            var adminId = _config["Telegram:ChatId"]; // Tu ID: 5054013248
+
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogError("❌ ERROR: No hay Token configurado en Bcv.Api.");
+                return;
+            }
 
             var botClient = new TelegramBotClient(token);
-            var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
 
+            // --- MENSAJE DE ARRANQUE PARA VERIFICAR EL BOT ---
+            try
+            {
+                await botClient.SendMessage(
+                    chatId: adminId,
+                    text: "🛡️ *Panel de Administración BCV Iniciado*\n\nEste bot es exclusivo para la gestión de API Keys. Si recibes este mensaje, la configuración es correcta.",
+                    parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                    cancellationToken: stoppingToken
+                );
+                _logger.LogInformation("✅ Notificación de inicio enviada al Bot de Administración.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("❌ No se pudo contactar al bot: {0}", ex.Message);
+            }
+
+            var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
             botClient.StartReceiving(HandleUpdateAsync, HandlePollingErrorAsync, receiverOptions, stoppingToken);
+
             _logger.LogInformation("Bot de Administración iniciado en la API.");
         }
-
         async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken ct)
         {
             if (update.Message is not { Text: { } messageText } message) return;
