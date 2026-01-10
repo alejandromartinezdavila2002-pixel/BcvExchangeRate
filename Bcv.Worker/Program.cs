@@ -4,7 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 
-// 1. CONFIGURACIÓN DEL HOST CON RUTA DINÁMICA
+// 1. CONFIGURACIÓN DEL HOST
 var options = new HostApplicationBuilderSettings
 {
     ContentRootPath = AppContext.BaseDirectory,
@@ -13,68 +13,49 @@ var options = new HostApplicationBuilderSettings
 
 var builder = Host.CreateApplicationBuilder(options);
 
-// --- 2. LIMPIEZA TOTAL DE CONFIGURACIÓN (IGUAL QUE EN LA API) ---
-// Esto ignora variables de entorno de Windows y secretos viejos
+// 2. CONFIGURACIÓN
+// Mantenemos tu lógica de limpiar y recargar para asegurar prioridad del JSON
 builder.Configuration.Sources.Clear();
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+// Agregamos esto por si acaso usas modo desarrollo local, no hace daño
+builder.Configuration.AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true);
 
-// 3. CONFIGURACIÓN DEL SERVICIO
-builder.Services.AddWindowsService(options =>
+// 3. SERVICIO DE WINDOWS
+builder.Services.AddWindowsService(opts =>
 {
-    options.ServiceName = "BCV Exchange Rate Service";
+    opts.ServiceName = "BCV Exchange Rate Service";
 });
 
-// 4. VALIDACIÓN Y DIAGNÓSTICO
+// 4. VALIDACIÓN PREVIA (Evitar que arranque si faltan datos)
 var supabaseUrl = builder.Configuration["Supabase:Url"];
 var supabaseKey = builder.Configuration["Supabase:Key"];
 var telegramToken = builder.Configuration["Telegram:Token"];
 
-Console.WriteLine("==========================================");
-Console.WriteLine("🔍 DIAGNÓSTICO DE BCV.WORKER");
-if (!string.IsNullOrEmpty(telegramToken))
+if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(supabaseKey) || string.IsNullOrEmpty(telegramToken))
 {
-    // Confirmamos que cargue el 8515... (@BcvWorker_bot)
-    Console.WriteLine($"🤖 TOKEN TRABAJADOR: {telegramToken.Substring(0, 10)}...");
-}
-else
-{
-    Console.WriteLine("❌ ERROR: No se encontró el Token en appsettings.json del Worker.");
-}
-Console.WriteLine("==========================================");
-
-if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(supabaseKey))
-{
-    throw new InvalidOperationException("Falta la configuración de Supabase.");
+    // Escribir en un archivo de log de emergencia si falla el arranque
+    File.AppendAllText("startup_error.log", $"[{DateTime.Now}] Faltan credenciales en appsettings.json\n");
+    throw new InvalidOperationException("Faltan configuraciones críticas (Supabase o Telegram).");
 }
 
-if (string.IsNullOrEmpty(telegramToken))
-{
-    throw new InvalidOperationException("Falta el Token de Telegram del Worker.");
-}
-
-// 5. REGISTRO DE CLIENTE SUPABASE
+// 5. REGISTRO DE SERVICIOS
 builder.Services.AddSingleton(_ => new Supabase.Client(supabaseUrl, supabaseKey));
 
-// 6. REGISTRO DE CLIENTES HTTP (Protección Anti-Bloqueo)
 builder.Services.AddHttpClient("BcvClient", client =>
 {
     client.BaseAddress = new Uri("https://www.bcv.org.ve/");
-    client.Timeout = TimeSpan.FromSeconds(30);
+    // User-Agent real para evitar bloqueos
     client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 });
 
-builder.Services.AddHttpClient("TelegramClient", client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
+builder.Services.AddHttpClient("TelegramClient");
 
-// 7. REGISTRO DEL WORKER PRINCIPAL
 builder.Services.AddHostedService<Worker>();
 
-// 8. CONFIGURACIÓN DE CIERRE SEGURO
+// 6. CIERRE
 builder.Services.Configure<HostOptions>(hostOptions =>
 {
-    hostOptions.ShutdownTimeout = TimeSpan.FromSeconds(20);
+    hostOptions.ShutdownTimeout = TimeSpan.FromSeconds(10);
 });
 
 var host = builder.Build();
