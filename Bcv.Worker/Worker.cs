@@ -42,6 +42,9 @@ namespace Bcv.Worker
         {
             _logger.LogInformation("Worker iniciado. Sincronizando datos...");
 
+            // ESPERA INICIAL para evitar Timeouts de red al arrancar
+            await Task.Delay(5000, stoppingToken);
+
             // 1. Sincronización inicial con Supabase o Respaldo Local
             try
             {

@@ -4,7 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>dotnet-Bcv.Worker-3141517c-c01e-4bf3-8ae9-625b6b689763</UserSecretsId>
+   
   </PropertyGroup>
 
   <ItemGroup>
